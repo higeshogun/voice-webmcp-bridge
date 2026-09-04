@@ -1,0 +1,16 @@
+{
+  "name": "voice-webmcp-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["bridge", "voice-agent"],
+  "scripts": {
+    "build": "npm run build --workspace voice-agent && npm run build:bookmarklet",
+    "build:bookmarklet": "node scripts/build-bookmarklet.mjs",
+    "start:bridge": "npm start --workspace bridge",
+    "start:agent": "npm run dev --workspace voice-agent",
+    "test": "npm test --workspace bridge"
+  },
+  "devDependencies": {
+    "terser": "^5.36.0"
+  }
+}
