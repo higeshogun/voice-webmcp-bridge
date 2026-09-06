@@ -35,7 +35,7 @@ cp voice-agent/.env.example voice-agent/.env
 npm run start:agent
 ```
 
-Set `VITE_REALTIME_URL` to your own server before starting the agent. The supplied `.env` sets `VITE_OUTPUT_SAMPLE_RATE=16000`; adjust it if your backend returns PCM at another rate.
+Set `VITE_REALTIME_URL` to your own server before starting the agent. The supplied `.env` uses the Custom / legacy preset and 16 kHz output. For the public Hugging Face speech-to-speech project, choose **Hugging Face speech-to-speech** in the UI (or set `VITE_REALTIME_PRESET=huggingface`) and use `ws://HOST:8765/v1/realtime`; the preset uses 24 kHz PCM16 automatically. For WebRTC, set the endpoint to `http://HOST:8765/v1/realtime`; the app adds `/calls` for the Hugging Face endpoint.
 
 Open the Vite URL shown in the terminal, normally `http://127.0.0.1:5173`. Its Bridge status should become **connected**.
 

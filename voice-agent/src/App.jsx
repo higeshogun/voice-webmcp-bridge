@@ -3,6 +3,7 @@ import { connectRealtime } from "./realtime.js";
 
 const BRIDGE_URL = import.meta.env.VITE_BRIDGE_URL || "ws://localhost:8080";
 const REALTIME_URL = import.meta.env.VITE_REALTIME_URL || "";
+const DEFAULT_REALTIME_PRESET = import.meta.env.VITE_REALTIME_PRESET === "huggingface" ? "huggingface" : "custom";
 const normalize = (tool) => ({ type: "function", name: tool.name, description: tool.description || "", parameters: tool.parameters || { type: "object", properties: {} } });
 const MAX_TRANSCRIPT_ENTRIES = 32;
 const MAX_TOOL_CALLS = 20;
@@ -33,6 +34,7 @@ export default function App() {
   const [selectedBlueprintToolName, setSelectedBlueprintToolName] = useState("");
   const [selectedBlueprintToolNames, setSelectedBlueprintToolNames] = useState([]);
   const [agentStatus, setAgentStatus] = useState("idle");
+  const [realtimePreset, setRealtimePreset] = useState(() => localStorage.getItem("voice-webmcp.realtime-preset") || DEFAULT_REALTIME_PRESET);
   const [bargeInEnabled, setBargeInEnabled] = useState(() => localStorage.getItem("voice-webmcp.barge-in") !== "false");
   const [systemPrompt, setSystemPrompt] = useState(() => localStorage.getItem("voice-webmcp.system-prompt") || DEFAULT_SYSTEM_PROMPT);
   const [toolPolicies, setToolPolicies] = useState(() => {
@@ -168,6 +170,7 @@ export default function App() {
   }, [bargeInEnabled]);
 
   useEffect(() => localStorage.setItem("voice-webmcp.system-prompt", systemPrompt), [systemPrompt]);
+  useEffect(() => localStorage.setItem("voice-webmcp.realtime-preset", realtimePreset), [realtimePreset]);
   useEffect(() => {
     localStorage.setItem("voice-webmcp.tool-policies", JSON.stringify(toolPolicies));
     toolPoliciesRef.current = toolPolicies;
@@ -209,6 +212,7 @@ export default function App() {
       setSelectedCallId(null);
       const session = await connectRealtime({
         endpoint: REALTIME_URL,
+        preset: realtimePreset,
         tools: activeTools,
         systemPrompt,
         audioElement: playbackRef.current,
@@ -248,6 +252,8 @@ export default function App() {
       <div className="pairing"><span>Pair a browser tab</span><strong>{pairingCode || "Creating code…"}</strong><small>Run the bookmarklet and enter this six-digit code.</small></div>
       <label>Active target tab<select value={activeOrigin} onChange={(event) => setActiveOrigin(event.target.value)}><option value="">Choose a discovered page</option>{Object.keys(toolsByOrigin).map((origin) => <option key={origin}>{origin}</option>)}</select></label>
       <label className="toggle"><input type="checkbox" checked={bargeInEnabled} onChange={(event) => setBargeInEnabled(event.target.checked)} /> <span>Allow interruption / barge-in</span></label>
+      <label>Realtime backend<select value={realtimePreset} disabled={agentStatus === "connected"} onChange={(event) => setRealtimePreset(event.target.value)}><option value="custom">Custom / legacy Realtime</option><option value="huggingface">Hugging Face speech-to-speech</option></select></label>
+      {realtimePreset === "huggingface" && <p className="hint">Hugging Face preset: PCM16 24 kHz over WebSocket; WebRTC uses <code>/v1/realtime/calls</code> and the <code>oai-events</code> data channel.</p>}
       <label>System prompt<textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} rows="4" placeholder="Instructions for the voice agent" /></label>
       <div className="prompt-actions"><button className="secondary" onClick={applySystemPrompt}>Apply prompt</button><span>Saved locally and sent with each new session.</span></div>
       <div className="actions"><button disabled={agentStatus === "connected" || !activeOrigin} onClick={startAgent}>Start voice agent</button><button className="secondary" disabled={agentStatus !== "connected"} onClick={stopAgent}>Stop</button></div>

@@ -1,10 +1,96 @@
-const INPUT_SAMPLE_RATE = 16_000;
-// hf-s2s currently emits PCM16 at 16 kHz. Web Audio resamples this buffer to
-// the hardware rate automatically; declaring it as 24 kHz makes speech play 1.5× too fast.
-const requestedOutputRate = Number(import.meta.env.VITE_OUTPUT_SAMPLE_RATE || 16_000);
-const OUTPUT_SAMPLE_RATE = Number.isFinite(requestedOutputRate) && requestedOutputRate >= 8_000 && requestedOutputRate <= 48_000
-  ? requestedOutputRate
-  : 16_000;
+const HUGGING_FACE_PRESET = "huggingface";
+
+function validSampleRate(value, fallback) {
+  const sampleRate = Number(value);
+  return Number.isFinite(sampleRate) && sampleRate >= 8_000 && sampleRate <= 48_000 ? sampleRate : fallback;
+}
+
+function huggingFaceSampleRate(value, fallback) {
+  const sampleRate = Number(value);
+  // The public server accepts its native 16 kHz rate when the PCM format is
+  // omitted, or the OpenAI Realtime PCM schema at 24 kHz.
+  return sampleRate === 16_000 || sampleRate === 24_000 ? sampleRate : fallback;
+}
+
+function isHuggingFacePreset(preset) {
+  return preset === HUGGING_FACE_PRESET;
+}
+
+function sampleRatesFor(preset) {
+  // The public Hugging Face client uses PCM16 at 24 kHz over WebSocket. Its
+  // server resamples this to the 16 kHz pipeline rate internally. Preserve the
+  // legacy 16 kHz defaults for the user's existing custom hf-s2s endpoint.
+  if (isHuggingFacePreset(preset)) {
+    return {
+      input: huggingFaceSampleRate(import.meta.env.VITE_HUGGING_FACE_INPUT_SAMPLE_RATE, 24_000),
+      output: huggingFaceSampleRate(import.meta.env.VITE_HUGGING_FACE_OUTPUT_SAMPLE_RATE, 24_000)
+    };
+  }
+  return {
+    input: validSampleRate(import.meta.env.VITE_INPUT_SAMPLE_RATE, 16_000),
+    output: validSampleRate(import.meta.env.VITE_OUTPUT_SAMPLE_RATE, 16_000)
+  };
+}
+
+function serverVad(bargeInEnabled) {
+  return { type: "server_vad", create_response: true, interrupt_response: bargeInEnabled };
+}
+
+function huggingFaceServerVad(bargeInEnabled) {
+  return { type: "server_vad", interrupt_response: bargeInEnabled };
+}
+
+function huggingFacePCMFormat(sampleRate) {
+  return sampleRate === 24_000 ? { type: "audio/pcm", rate: 24_000 } : undefined;
+}
+
+function sessionUpdate({ preset, tools, systemPrompt, bargeInEnabled, includeAudio = true }) {
+  if (!isHuggingFacePreset(preset)) {
+    return {
+      type: "session.update",
+      session: {
+        modalities: ["text", "audio"],
+        instructions: systemPrompt,
+        input_audio_format: "pcm16",
+        output_audio_format: "pcm16",
+        turn_detection: serverVad(bargeInEnabled),
+        tools,
+        tool_choice: "auto"
+      }
+    };
+  }
+
+  const rates = sampleRatesFor(preset);
+  const input = { turn_detection: huggingFaceServerVad(bargeInEnabled) };
+  const output = {};
+  const inputFormat = huggingFacePCMFormat(rates.input);
+  const outputFormat = huggingFacePCMFormat(rates.output);
+  if (inputFormat) input.format = inputFormat;
+  if (outputFormat) output.format = outputFormat;
+  return {
+    type: "session.update",
+    session: {
+      type: "realtime",
+      instructions: systemPrompt,
+      audio: includeAudio ? { input, output } : { input: { turn_detection: huggingFaceServerVad(bargeInEnabled) } },
+      tools,
+      tool_choice: "auto"
+    }
+  };
+}
+
+function turnDetectionUpdate(preset, bargeInEnabled) {
+  return isHuggingFacePreset(preset)
+    ? { type: "session.update", session: { audio: { input: { turn_detection: huggingFaceServerVad(bargeInEnabled) } } } }
+    : { type: "session.update", session: { turn_detection: serverVad(bargeInEnabled) } };
+}
+
+function webRTCEndpointFor(endpoint, preset) {
+  if (!isHuggingFacePreset(preset)) return endpoint;
+  const url = new URL(endpoint);
+  if (url.pathname.replace(/\/$/, "") === "/v1/realtime") url.pathname = "/v1/realtime/calls";
+  return url.toString();
+}
 
 function bytesToBase64(bytes) {
   let text = "";
@@ -33,13 +119,13 @@ function resample(samples, fromRate, toRate) {
   return output;
 }
 
-function playPCM16(context, encoded, state) {
+function playPCM16(context, encoded, state, sampleRate) {
   const binary = atob(encoded);
   const input = new DataView(new ArrayBuffer(binary.length));
   for (let index = 0; index < binary.length; index++) input.setUint8(index, binary.charCodeAt(index));
   const floats = new Float32Array(binary.length / 2);
   for (let index = 0; index < floats.length; index++) floats[index] = input.getInt16(index * 2, true) / 0x8000;
-  const buffer = context.createBuffer(1, floats.length, OUTPUT_SAMPLE_RATE);
+  const buffer = context.createBuffer(1, floats.length, sampleRate);
   buffer.copyToChannel(floats, 0);
   const source = context.createBufferSource();
   source.buffer = buffer;
@@ -66,7 +152,7 @@ export async function connectRealtime(options) {
     : connectWebRTCRealtime(options);
 }
 
-async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", onEvent, onStatus, onBargeIn, bargeInEnabled = true }) {
+async function connectWebSocketRealtime({ endpoint, preset = "custom", tools, systemPrompt = "", onEvent, onStatus, onBargeIn, bargeInEnabled = true }) {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable in this browser.");
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
@@ -84,8 +170,11 @@ async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", on
   const playback = { nextStart: 0, sources: new Set() };
   let bargeInAllowed = bargeInEnabled;
   let activeResponse = false;
+  let responseOpen = false;
   let awaitingCancelledResponse = false;
-  const turnDetection = () => ({ type: "server_vad", create_response: true, interrupt_response: bargeInAllowed });
+  let followUpAfterResponse = false;
+  const inputSampleRate = sampleRatesFor(preset).input;
+  const outputSampleRate = sampleRatesFor(preset).output;
   const interrupt = (reason) => {
     const hasQueuedPlayback = playback.sources.size > 0;
     if (!bargeInAllowed || (!activeResponse && !hasQueuedPlayback) || awaitingCancelledResponse || socket.readyState !== WebSocket.OPEN) return;
@@ -97,7 +186,7 @@ async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", on
   };
 
   socket.addEventListener("open", () => {
-    socket.send(JSON.stringify({ type: "session.update", session: { modalities: ["text", "audio"], instructions: systemPrompt, input_audio_format: "pcm16", output_audio_format: "pcm16", turn_detection: turnDetection(), tools, tool_choice: "auto" } }));
+    socket.send(JSON.stringify(sessionUpdate({ preset, tools, systemPrompt, bargeInEnabled: bargeInAllowed })));
     onStatus("connected");
   });
   socket.addEventListener("message", (event) => {
@@ -106,9 +195,21 @@ async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", on
     if (payload.type === "input_audio_buffer.speech_started") interrupt("server VAD");
     if (payload.type === "response.created") {
       activeResponse = true;
+      responseOpen = true;
       awaitingCancelledResponse = false;
     }
-    if (payload.type === "response.done" || payload.type === "response.output_audio.done" || payload.type === "response.audio.done") {
+    if (payload.type === "response.done") {
+      activeResponse = false;
+      responseOpen = false;
+      awaitingCancelledResponse = false;
+      // HF's GA server keeps a function-call response open until this event.
+      // Coalesce completed page-tool outputs into one follow-up response.
+      if (followUpAfterResponse) {
+        followUpAfterResponse = false;
+        socket.send(JSON.stringify({ type: "response.create" }));
+      }
+    }
+    if (payload.type === "response.output_audio.done" || payload.type === "response.audio.done") {
       activeResponse = false;
       awaitingCancelledResponse = false;
     }
@@ -116,7 +217,7 @@ async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", on
     if (payload.type === "response.output_audio.delta" || payload.type === "response.audio.delta") {
       if (awaitingCancelledResponse) return;
       activeResponse = true;
-      if (payload.delta) playPCM16(context, payload.delta, playback);
+      if (payload.delta) playPCM16(context, payload.delta, playback, outputSampleRate);
       return;
     }
     onEvent(payload);
@@ -126,7 +227,7 @@ async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", on
   processor.onaudioprocess = (event) => {
     if (socket.readyState !== WebSocket.OPEN) return;
     const input = event.inputBuffer.getChannelData(0);
-    const pcm = floatToPCM16(resample(input, context.sampleRate, INPUT_SAMPLE_RATE));
+    const pcm = floatToPCM16(resample(input, context.sampleRate, inputSampleRate));
     socket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: bytesToBase64(pcm) }));
   };
 
@@ -135,7 +236,7 @@ async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", on
     setBargeInEnabled(enabled) {
       bargeInAllowed = enabled;
       if (!enabled) awaitingCancelledResponse = false;
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "session.update", session: { turn_detection: turnDetection() } }));
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(turnDetectionUpdate(preset, bargeInAllowed)));
     },
     setInstructions(instructions) {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "session.update", session: { instructions } }));
@@ -143,6 +244,10 @@ async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", on
     sendToolOutput(callId, output) {
       if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(output) } }));
+      if (isHuggingFacePreset(preset) && responseOpen) {
+        followUpAfterResponse = true;
+        return;
+      }
       socket.send(JSON.stringify({ type: "response.create" }));
     },
     close() {
@@ -153,7 +258,7 @@ async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", on
   };
 }
 
-async function connectWebRTCRealtime({ endpoint, tools, systemPrompt = "", onEvent, onStatus, audioElement }) {
+async function connectWebRTCRealtime({ endpoint, preset = "custom", tools, systemPrompt = "", onEvent, onStatus, audioElement, bargeInEnabled = true }) {
   if (!endpoint) throw new Error("Set VITE_REALTIME_URL to the local WebRTC SDP endpoint.");
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable in this browser.");
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -163,26 +268,47 @@ async function connectWebRTCRealtime({ endpoint, tools, systemPrompt = "", onEve
     if (!audioElement) return;
     audioElement.srcObject = event.streams[0]; audioElement.play().catch(() => {});
   });
-  const dataChannel = peer.createDataChannel("model-events");
-  dataChannel.addEventListener("message", (event) => { try { onEvent(JSON.parse(event.data)); } catch {} });
+  const dataChannel = peer.createDataChannel(isHuggingFacePreset(preset) ? "oai-events" : "model-events");
+  let responseOpen = false;
+  let followUpAfterResponse = false;
+  dataChannel.addEventListener("message", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload.type === "response.created") responseOpen = true;
+      if (payload.type === "response.done") {
+        responseOpen = false;
+        if (followUpAfterResponse) {
+          followUpAfterResponse = false;
+          dataChannel.send(JSON.stringify({ type: "response.create" }));
+        }
+      }
+      onEvent(payload);
+    } catch {}
+  });
   dataChannel.addEventListener("open", () => {
     onStatus("connected");
-    dataChannel.send(JSON.stringify({ type: "session.update", session: { modalities: ["text", "audio"], instructions: systemPrompt, tools, tool_choice: "auto" } }));
+    dataChannel.send(JSON.stringify(sessionUpdate({ preset, tools, systemPrompt, bargeInEnabled, includeAudio: !isHuggingFacePreset(preset) })));
   });
   dataChannel.addEventListener("close", () => onStatus("disconnected"));
   peer.addEventListener("connectionstatechange", () => { if (["failed", "closed", "disconnected"].includes(peer.connectionState)) onStatus("disconnected"); });
   const offer = await peer.createOffer();
   await peer.setLocalDescription(offer);
-  const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/sdp", Accept: "application/sdp" }, body: offer.sdp });
+  const response = await fetch(webRTCEndpointFor(endpoint, preset), { method: "POST", headers: { "Content-Type": "application/sdp", Accept: "application/sdp" }, body: offer.sdp });
   if (!response.ok) { stream.getTracks().forEach((track) => track.stop()); peer.close(); throw new Error(`Realtime backend rejected the WebRTC offer (${response.status}).`); }
   await peer.setRemoteDescription({ type: "answer", sdp: await response.text() });
   return {
     updateTools(nextTools) { if (dataChannel.readyState === "open") dataChannel.send(JSON.stringify({ type: "session.update", session: { tools: nextTools, tool_choice: "auto" } })); },
-    setBargeInEnabled() {},
+    setBargeInEnabled(enabled) {
+      if (dataChannel.readyState === "open") dataChannel.send(JSON.stringify(turnDetectionUpdate(preset, enabled)));
+    },
     setInstructions(instructions) { if (dataChannel.readyState === "open") dataChannel.send(JSON.stringify({ type: "session.update", session: { instructions } })); },
     sendToolOutput(callId, output) {
       if (dataChannel.readyState !== "open") return;
       dataChannel.send(JSON.stringify({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(output) } }));
+      if (isHuggingFacePreset(preset) && responseOpen) {
+        followUpAfterResponse = true;
+        return;
+      }
       dataChannel.send(JSON.stringify({ type: "response.create" }));
     },
     close() { stream.getTracks().forEach((track) => track.stop()); dataChannel.close(); peer.close(); }

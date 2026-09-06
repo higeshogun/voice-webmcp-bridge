@@ -20,7 +20,7 @@ npm run build:bookmarklet
 npm run start:bridge
 ```
 
-In another terminal, configure the WebRTC SDP endpoint and run the UI:
+In another terminal, configure the Realtime endpoint and run the UI:
 
 ```sh
 cp voice-agent/.env.example voice-agent/.env
@@ -31,9 +31,18 @@ Open the displayed Vite URL, then drag the full contents of `bookmarklet/bookmar
 
 Each tool can instead be changed to **Auto-run** in the Tool Blueprint. Select multiple tool checkboxes (or all tools) to set their policy together. This local preference is scoped to that page origin and tool name; all other tools continue to require approval by default.
 
-## Windows Realtime backend contract
+## Realtime backend presets
 
-`VITE_REALTIME_URL` supports either an SDP-over-HTTP WebRTC facade or an OpenAI-style `ws://`/`wss://` Realtime facade. The latter sends and receives JSON events directly, streams 16 kHz PCM microphone input, and schedules PCM output for playback at `VITE_OUTPUT_SAMPLE_RATE` (16 kHz by default for `hf-s2s`). The WebRTC variant sends Realtime events on a channel named `model-events`, including:
+`VITE_REALTIME_URL` supports either an SDP-over-HTTP WebRTC facade or an OpenAI-style `ws://`/`wss://` Realtime facade. Choose the backend in the UI before starting a session, or set its first-run default with `VITE_REALTIME_PRESET`.
+
+| Preset | WebSocket URL | WebRTC URL | Audio and event contract |
+|---|---|---|---|
+| Custom / legacy | Your existing `ws://` or `wss://` endpoint | Your existing SDP endpoint | 16 kHz PCM defaults; `model-events` data channel |
+| Hugging Face speech-to-speech | `ws://HOST:8765/v1/realtime` | `http://HOST:8765/v1/realtime` (the app adds `/calls`) | PCM16 24 kHz defaults; GA session shape; `oai-events` data channel |
+
+The Hugging Face preset targets the public [`huggingface/speech-to-speech`](https://github.com/huggingface/speech-to-speech) Realtime server. It sends the current OpenAI GA-style nested audio/VAD session configuration, listens for `response.function_call_arguments.done`, and returns tool results as function-call outputs followed by `response.create`. Its 24 kHz defaults apply only to that preset; your existing custom `hf-s2s` configuration remains 16 kHz by default.
+
+The custom WebRTC variant sends Realtime events on a channel named `model-events`, including:
 
 ```json
 { "type": "session.update", "session": { "tools": [{ "type": "function", "name": "addToCart", "parameters": { "type": "object" } }] } }
