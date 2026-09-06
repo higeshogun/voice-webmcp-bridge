@@ -1,10 +1,3 @@
-const HUGGING_FACE_PRESET = "huggingface";
-
-function validSampleRate(value, fallback) {
-  const sampleRate = Number(value);
-  return Number.isFinite(sampleRate) && sampleRate >= 8_000 && sampleRate <= 48_000 ? sampleRate : fallback;
-}
-
 function huggingFaceSampleRate(value, fallback) {
   const sampleRate = Number(value);
   // The public server accepts its native 16 kHz rate when the PCM format is
@@ -12,28 +5,11 @@ function huggingFaceSampleRate(value, fallback) {
   return sampleRate === 16_000 || sampleRate === 24_000 ? sampleRate : fallback;
 }
 
-function isHuggingFacePreset(preset) {
-  return preset === HUGGING_FACE_PRESET;
-}
-
-function sampleRatesFor(preset) {
-  // The public Hugging Face client uses PCM16 at 24 kHz over WebSocket. Its
-  // server resamples this to the 16 kHz pipeline rate internally. Preserve the
-  // legacy 16 kHz defaults for the user's existing custom hf-s2s endpoint.
-  if (isHuggingFacePreset(preset)) {
-    return {
-      input: huggingFaceSampleRate(import.meta.env.VITE_HUGGING_FACE_INPUT_SAMPLE_RATE, 24_000),
-      output: huggingFaceSampleRate(import.meta.env.VITE_HUGGING_FACE_OUTPUT_SAMPLE_RATE, 24_000)
-    };
-  }
+function sampleRates() {
   return {
-    input: validSampleRate(import.meta.env.VITE_INPUT_SAMPLE_RATE, 16_000),
-    output: validSampleRate(import.meta.env.VITE_OUTPUT_SAMPLE_RATE, 16_000)
+    input: huggingFaceSampleRate(import.meta.env.VITE_HUGGING_FACE_INPUT_SAMPLE_RATE, 24_000),
+    output: huggingFaceSampleRate(import.meta.env.VITE_HUGGING_FACE_OUTPUT_SAMPLE_RATE, 24_000)
   };
-}
-
-function serverVad(bargeInEnabled) {
-  return { type: "server_vad", create_response: true, interrupt_response: bargeInEnabled };
 }
 
 function huggingFaceServerVad(bargeInEnabled) {
@@ -44,23 +20,8 @@ function huggingFacePCMFormat(sampleRate) {
   return sampleRate === 24_000 ? { type: "audio/pcm", rate: 24_000 } : undefined;
 }
 
-function sessionUpdate({ preset, tools, systemPrompt, bargeInEnabled, includeAudio = true }) {
-  if (!isHuggingFacePreset(preset)) {
-    return {
-      type: "session.update",
-      session: {
-        modalities: ["text", "audio"],
-        instructions: systemPrompt,
-        input_audio_format: "pcm16",
-        output_audio_format: "pcm16",
-        turn_detection: serverVad(bargeInEnabled),
-        tools,
-        tool_choice: "auto"
-      }
-    };
-  }
-
-  const rates = sampleRatesFor(preset);
+function sessionUpdate({ tools, systemPrompt, bargeInEnabled, includeAudio = true }) {
+  const rates = sampleRates();
   const input = { turn_detection: huggingFaceServerVad(bargeInEnabled) };
   const output = {};
   const inputFormat = huggingFacePCMFormat(rates.input);
@@ -79,14 +40,11 @@ function sessionUpdate({ preset, tools, systemPrompt, bargeInEnabled, includeAud
   };
 }
 
-function turnDetectionUpdate(preset, bargeInEnabled) {
-  return isHuggingFacePreset(preset)
-    ? { type: "session.update", session: { audio: { input: { turn_detection: huggingFaceServerVad(bargeInEnabled) } } } }
-    : { type: "session.update", session: { turn_detection: serverVad(bargeInEnabled) } };
+function turnDetectionUpdate(bargeInEnabled) {
+  return { type: "session.update", session: { audio: { input: { turn_detection: huggingFaceServerVad(bargeInEnabled) } } } };
 }
 
-function webRTCEndpointFor(endpoint, preset) {
-  if (!isHuggingFacePreset(preset)) return endpoint;
+function webRTCEndpointFor(endpoint) {
   const url = new URL(endpoint);
   if (url.pathname.replace(/\/$/, "") === "/v1/realtime") url.pathname = "/v1/realtime/calls";
   return url.toString();
@@ -152,7 +110,7 @@ export async function connectRealtime(options) {
     : connectWebRTCRealtime(options);
 }
 
-async function connectWebSocketRealtime({ endpoint, preset = "custom", tools, systemPrompt = "", onEvent, onStatus, onBargeIn, bargeInEnabled = true }) {
+async function connectWebSocketRealtime({ endpoint, tools, systemPrompt = "", onEvent, onStatus, onBargeIn, bargeInEnabled = true }) {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable in this browser.");
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
@@ -173,8 +131,8 @@ async function connectWebSocketRealtime({ endpoint, preset = "custom", tools, sy
   let responseOpen = false;
   let awaitingCancelledResponse = false;
   let followUpAfterResponse = false;
-  const inputSampleRate = sampleRatesFor(preset).input;
-  const outputSampleRate = sampleRatesFor(preset).output;
+  const inputSampleRate = sampleRates().input;
+  const outputSampleRate = sampleRates().output;
   const interrupt = (reason) => {
     const hasQueuedPlayback = playback.sources.size > 0;
     if (!bargeInAllowed || (!activeResponse && !hasQueuedPlayback) || awaitingCancelledResponse || socket.readyState !== WebSocket.OPEN) return;
@@ -186,7 +144,7 @@ async function connectWebSocketRealtime({ endpoint, preset = "custom", tools, sy
   };
 
   socket.addEventListener("open", () => {
-    socket.send(JSON.stringify(sessionUpdate({ preset, tools, systemPrompt, bargeInEnabled: bargeInAllowed })));
+    socket.send(JSON.stringify(sessionUpdate({ tools, systemPrompt, bargeInEnabled: bargeInAllowed })));
     onStatus("connected");
   });
   socket.addEventListener("message", (event) => {
@@ -236,7 +194,7 @@ async function connectWebSocketRealtime({ endpoint, preset = "custom", tools, sy
     setBargeInEnabled(enabled) {
       bargeInAllowed = enabled;
       if (!enabled) awaitingCancelledResponse = false;
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(turnDetectionUpdate(preset, bargeInAllowed)));
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(turnDetectionUpdate(bargeInAllowed)));
     },
     setInstructions(instructions) {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "session.update", session: { instructions } }));
@@ -244,7 +202,7 @@ async function connectWebSocketRealtime({ endpoint, preset = "custom", tools, sy
     sendToolOutput(callId, output) {
       if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(output) } }));
-      if (isHuggingFacePreset(preset) && responseOpen) {
+      if (responseOpen) {
         followUpAfterResponse = true;
         return;
       }
@@ -258,7 +216,7 @@ async function connectWebSocketRealtime({ endpoint, preset = "custom", tools, sy
   };
 }
 
-async function connectWebRTCRealtime({ endpoint, preset = "custom", tools, systemPrompt = "", onEvent, onStatus, audioElement, bargeInEnabled = true }) {
+async function connectWebRTCRealtime({ endpoint, tools, systemPrompt = "", onEvent, onStatus, audioElement, bargeInEnabled = true }) {
   if (!endpoint) throw new Error("Set VITE_REALTIME_URL to the local WebRTC SDP endpoint.");
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable in this browser.");
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -268,7 +226,7 @@ async function connectWebRTCRealtime({ endpoint, preset = "custom", tools, syste
     if (!audioElement) return;
     audioElement.srcObject = event.streams[0]; audioElement.play().catch(() => {});
   });
-  const dataChannel = peer.createDataChannel(isHuggingFacePreset(preset) ? "oai-events" : "model-events");
+  const dataChannel = peer.createDataChannel("oai-events");
   let responseOpen = false;
   let followUpAfterResponse = false;
   dataChannel.addEventListener("message", (event) => {
@@ -287,25 +245,25 @@ async function connectWebRTCRealtime({ endpoint, preset = "custom", tools, syste
   });
   dataChannel.addEventListener("open", () => {
     onStatus("connected");
-    dataChannel.send(JSON.stringify(sessionUpdate({ preset, tools, systemPrompt, bargeInEnabled, includeAudio: !isHuggingFacePreset(preset) })));
+    dataChannel.send(JSON.stringify(sessionUpdate({ tools, systemPrompt, bargeInEnabled, includeAudio: false })));
   });
   dataChannel.addEventListener("close", () => onStatus("disconnected"));
   peer.addEventListener("connectionstatechange", () => { if (["failed", "closed", "disconnected"].includes(peer.connectionState)) onStatus("disconnected"); });
   const offer = await peer.createOffer();
   await peer.setLocalDescription(offer);
-  const response = await fetch(webRTCEndpointFor(endpoint, preset), { method: "POST", headers: { "Content-Type": "application/sdp", Accept: "application/sdp" }, body: offer.sdp });
+  const response = await fetch(webRTCEndpointFor(endpoint), { method: "POST", headers: { "Content-Type": "application/sdp", Accept: "application/sdp" }, body: offer.sdp });
   if (!response.ok) { stream.getTracks().forEach((track) => track.stop()); peer.close(); throw new Error(`Realtime backend rejected the WebRTC offer (${response.status}).`); }
   await peer.setRemoteDescription({ type: "answer", sdp: await response.text() });
   return {
     updateTools(nextTools) { if (dataChannel.readyState === "open") dataChannel.send(JSON.stringify({ type: "session.update", session: { tools: nextTools, tool_choice: "auto" } })); },
     setBargeInEnabled(enabled) {
-      if (dataChannel.readyState === "open") dataChannel.send(JSON.stringify(turnDetectionUpdate(preset, enabled)));
+      if (dataChannel.readyState === "open") dataChannel.send(JSON.stringify(turnDetectionUpdate(enabled)));
     },
     setInstructions(instructions) { if (dataChannel.readyState === "open") dataChannel.send(JSON.stringify({ type: "session.update", session: { instructions } })); },
     sendToolOutput(callId, output) {
       if (dataChannel.readyState !== "open") return;
       dataChannel.send(JSON.stringify({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(output) } }));
-      if (isHuggingFacePreset(preset) && responseOpen) {
+      if (responseOpen) {
         followUpAfterResponse = true;
         return;
       }

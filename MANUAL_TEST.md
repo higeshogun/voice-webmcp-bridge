@@ -7,8 +7,8 @@ Use this guide to validate the full path: a WebMCP page exposes tools, the bookm
 | Requirement | Check |
 |---|---|
 | Chrome/Edge WebMCP support | In a Chromium browser that supports WebMCP, open `chrome://flags/#enable-webmcp-testing`, enable it, then relaunch. If this flag is absent, use a newer Chrome/Chrome Beta/Canary build. |
-| Target test page | Use `https://webmcp.sh/`. It exposes read-only tools such as `get_current_context`. |
-| Local speech server | Set `VITE_REALTIME_URL` in `voice-agent/.env` to your own reachable realtime endpoint. |
+| Target test page | Recommended: [WebMCP Pizza Maker](https://googlechromelabs.github.io/webmcp-tools/demos/pizza-maker/). Alternate read-only test: `https://webmcp.sh/`. |
+| Realtime backend | This repository does not include one. Set `VITE_REALTIME_URL` in `voice-agent/.env` to a reachable endpoint you operate or are authorized to use. |
 | Microphone | Be ready to allow microphone access for `http://127.0.0.1:5173`. |
 
 ## Start the local components
@@ -35,7 +35,11 @@ cp voice-agent/.env.example voice-agent/.env
 npm run start:agent
 ```
 
-Set `VITE_REALTIME_URL` to your own server before starting the agent. The supplied `.env` uses the Custom / legacy preset and 16 kHz output. For the public Hugging Face speech-to-speech project, choose **Hugging Face speech-to-speech** in the UI (or set `VITE_REALTIME_PRESET=huggingface`) and use `ws://HOST:8765/v1/realtime`; the preset uses 24 kHz PCM16 automatically. For WebRTC, set the endpoint to `http://HOST:8765/v1/realtime`; the app adds `/calls` for the Hugging Face endpoint.
+Set `VITE_REALTIME_URL` to your own compatible Hugging Face speech-to-speech
+server before starting the agent. Direct WebSocket is the recommended first
+path: `wss://YOUR_REALTIME_HOST/v1/realtime`. The client uses 24 kHz PCM16
+automatically. WebRTC is optional and needs an SDP-capable facade at
+`https://YOUR_REALTIME_HOST/v1/realtime`; the app adds `/calls`.
 
 Open the Vite URL shown in the terminal, normally `http://127.0.0.1:5173`. Its Bridge status should become **connected**.
 
@@ -51,11 +55,14 @@ npm run build:bookmarklet
 1. Show Chrome’s bookmarks bar with `Cmd` + `Shift` + `B`.
 2. Create a new bookmark. Any title is fine, for example **Voice WebMCP**.
 3. Copy the *entire single line* from `bookmarklet/bookmarklet.txt` into the bookmark’s URL field.
-4. Open `https://webmcp.sh/` in Chrome.
+4. Open the [WebMCP Pizza Maker demo](https://googlechromelabs.github.io/webmcp-tools/demos/pizza-maker/) in Chrome.
 5. In Voice WebMCP, note the six-digit **Pair a browser tab** code.
 6. Click the **Voice WebMCP** bookmark once, then enter that code when asked.
 
-Expected result: the Voice WebMCP app receives `https://webmcp.sh` as an Active target tab and lists its available tools. A code only pairs the tab with the one agent instance that generated it.
+Expected result: the Voice WebMCP app receives the Pizza Maker origin as an
+Active target tab and lists its available tools, including pizza size, style,
+layers, and toppings. A code only pairs the tab with the one agent instance
+that generated it.
 
 For each discovered tool, choose its **Execution** policy in the Tool Blueprint:
 
@@ -70,14 +77,15 @@ To configure several tools at once, select their checkboxes in the Tool Blueprin
 
 ## Check WebMCP before involving voice
 
-If no tools appear, open DevTools → Console on `webmcp.sh` and run:
+If no tools appear, open DevTools → Console on the Pizza Maker page and run:
 
 ```js
 const context = document.modelContext ?? navigator.modelContext;
 await context.getTools();
 ```
 
-Expected result: an array containing tools such as `get_current_context`, `list_all_routes`, and `app_gateway`.
+Expected result: an array containing Pizza Maker tools such as
+`set_pizza_size`, `set_pizza_style`, `toggle_layer`, and `add_topping`.
 
 | Result | Meaning | Next action |
 |---|---|---|
@@ -87,9 +95,9 @@ Expected result: an array containing tools such as `get_current_context`, `list_
 
 ## Run the voice and tool test
 
-1. In Voice WebMCP, select `https://webmcp.sh` if it is not already selected.
+1. In Voice WebMCP, select the Pizza Maker tab if it is not already selected.
 2. Click **Start voice agent** and allow microphone access.
-3. Say: **“Use the get_current_context tool, then tell me the current route.”**
+3. Say: **“Set the pizza size to Large.”**
 4. Pause after speaking so the server can complete the turn.
 
 The successful path is:
@@ -97,16 +105,16 @@ The successful path is:
 | Surface | Expected evidence |
 |---|---|
 | Voice WebMCP | Microphone and Realtime statuses become **live** / **connected**. |
-| Tool inspector | A pending `get_current_context` call shows its exact input. Click **Approve tool**; then the inspector shows its output. |
-| Voice WebMCP activity | `Approved get_current_context`, followed by `TOOL_RESULT: get_current_context`. |
-| Browser page | No page change is required: this tool is read-only. |
-| Speaker output | The assistant reports the current route, normally `/`. |
+| Tool inspector | A pending `set_pizza_size` call shows its exact input. Click **Approve tool**; then the inspector shows its output. |
+| Voice WebMCP activity | `Approved set_pizza_size`, followed by `TOOL_RESULT: set_pizza_size`. |
+| Browser page | The pizza size changes to Large. |
+| Speaker output | The assistant confirms the updated size. |
 
 ## Test interruption / barge-in
 
 1. Keep **Allow interruption / barge-in** enabled in Voice WebMCP. It is enabled by default and remembered locally.
 2. Ask a question likely to produce a longer reply.
-3. While the reply is audible, say: **“Stop. Use get_current_context instead.”**
+3. While the reply is audible, say: **“Stop. Tell me what pizza tools are available.”**
 
 Expected result: queued assistant audio stops immediately, the activity list records `Barge-in: assistant response cancelled (server VAD).`, and the server answers the new request. Use headphones for this test. Browser echo cancellation is requested, but physical speaker playback can still be misread as speech on some hardware.
 

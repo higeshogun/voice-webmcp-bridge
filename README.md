@@ -8,7 +8,7 @@ An isolated local stack that lets a browser voice agent discover WebMCP tools in
 |---|---|---|
 | Signaling bridge | `bridge/` | WebSocket router on `ws://localhost:8080` |
 | WebMCP injector | `bookmarklet/` | Bookmarklet source and generated URI |
-| Voice agent | `voice-agent/` | React/Vite UI, microphone/WebRTC, function-call relay |
+| Voice agent | `voice-agent/` | React/Vite UI, microphone transport, function-call relay |
 
 The bridge treats `REGISTER`, `CREATE_PAIRING`, and `SET_ACTIVE_PAGE` as control-plane messages. The agent displays a six-digit pairing code; the bookmarklet must enter it before its page tools can reach that agent. Selecting the paired page determines the exact bookmarklet socket that receives an `EXECUTE_TOOL` payload.
 
@@ -27,22 +27,48 @@ cp voice-agent/.env.example voice-agent/.env
 npm run start:agent
 ```
 
+### Bring a compatible realtime backend
+
+This repository contains the browser bridge, bookmarklet, and voice UI. It
+does **not** include or host a speech-to-speech inference service. Before
+starting the agent, set `VITE_REALTIME_URL` in `voice-agent/.env` to a
+Realtime-compatible endpoint you operate or are authorized to use.
+
+The project is tested with a self-hosted
+[`huggingface/speech-to-speech`](https://github.com/huggingface/speech-to-speech)
+Realtime server. It must accept the session, audio, function-call, and tool
+result events described below. Do not expose a local bridge or backend on the
+public internet without authentication and TLS.
+
 Open the displayed Vite URL, then drag the full contents of `bookmarklet/bookmarklet.txt` into a bookmark. With the bridge running, copy the six-digit pairing code from the app, open a page that exposes `document.modelContext` (or the legacy navigator alias), use that bookmark, enter the code, choose the discovered tab, and start the voice agent. Every tool call pauses in the inspector until you explicitly approve or decline it.
 
 Each tool can instead be changed to **Auto-run** in the Tool Blueprint. Select multiple tool checkboxes (or all tools) to set their policy together. This local preference is scoped to that page origin and tool name; all other tools continue to require approval by default.
 
-## Realtime backend presets
+### Recommended first browser test
 
-`VITE_REALTIME_URL` supports either an SDP-over-HTTP WebRTC facade or an OpenAI-style `ws://`/`wss://` Realtime facade. Choose the backend in the UI before starting a session, or set its first-run default with `VITE_REALTIME_PRESET`.
+Use the public [WebMCP Pizza Maker demo](https://googlechromelabs.github.io/webmcp-tools/demos/pizza-maker/)
+for the first complete test. Pair that tab, leave every tool on **Require
+approval**, and ask the agent to set the pizza size to Large. Confirm that the
+Tool Inspector shows the proposed `set_pizza_size` input before approving it.
+Avoid `share_pizza` until you have inspected its input and are comfortable with
+the destination it uses.
 
-| Preset | WebSocket URL | WebRTC URL | Audio and event contract |
-|---|---|---|---|
-| Custom / legacy | Your existing `ws://` or `wss://` endpoint | Your existing SDP endpoint | 16 kHz PCM defaults; `model-events` data channel |
-| Hugging Face speech-to-speech | `ws://HOST:8765/v1/realtime` | `http://HOST:8765/v1/realtime` (the app adds `/calls`) | PCM16 24 kHz defaults; GA session shape; `oai-events` data channel |
+[`webmcp.sh`](https://webmcp.sh/) remains a useful alternate test page when you
+want a read-only first call such as `get_current_context`.
 
-The Hugging Face preset targets the public [`huggingface/speech-to-speech`](https://github.com/huggingface/speech-to-speech) Realtime server. It sends the current OpenAI GA-style nested audio/VAD session configuration, listens for `response.function_call_arguments.done`, and returns tool results as function-call outputs followed by `response.create`. Its 24 kHz defaults apply only to that preset; your existing custom `hf-s2s` configuration remains 16 kHz by default.
+## Hugging Face Realtime backend
 
-The custom WebRTC variant sends Realtime events on a channel named `model-events`, including:
+The voice agent targets an OpenAI-Realtime-compatible
+[`huggingface/speech-to-speech`](https://github.com/huggingface/speech-to-speech)
+server. Direct WebSocket is the recommended first transport; WebRTC is
+optional and requires an SDP-capable facade.
+
+| Transport | `VITE_REALTIME_URL` | Audio and event contract |
+|---|---|---|
+| WebSocket | `wss://YOUR_REALTIME_HOST/v1/realtime` | PCM16 24 kHz; GA session shape |
+| WebRTC | `https://YOUR_REALTIME_HOST/v1/realtime` | Optional SDP facade; the app adds `/calls`; media over RTP; events on `oai-events` |
+
+The client sends the current OpenAI GA-style nested audio/VAD session configuration, listens for `response.function_call_arguments.done`, and returns tool results as function-call outputs. When the function response is still active, it waits for `response.done` before sending the one follow-up `response.create` required by the Hugging Face server.
 
 ```json
 { "type": "session.update", "session": { "tools": [{ "type": "function", "name": "addToCart", "parameters": { "type": "object" } }] } }
